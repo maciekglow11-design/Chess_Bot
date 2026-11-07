@@ -4,36 +4,51 @@ A zero-cost UCI chess engine project. The Python engine uses `python-chess` for 
 
 ## Run the engine
 
-Python 3.10+ is recommended.
-
 ```bash
 python -m pip install -r requirements.txt
 python engine.py
 ```
 
-Load it in a UCI-compatible chess GUI. The engine supports `uci`, `isready`, `position`, `go` with depth/node/clock limits, `stop`, and `quit`.
+Load it in a UCI-compatible chess GUI. UCI options include `Hash`, `Move Overhead`, and `Use Book`.
 
-## Play against a local Stockfish
+## Opening books
+
+A small built-in book covers common e4, d4, c4 and Nf3 lines. For a larger local book, create a Polyglot `.bin` from trusted PGN games:
+
+```bash
+python tools/build_opening_book.py games.pgn --output opening_book.bin --max-plies 24 --min-frequency 2
+```
+
+Set `CHESS_BOT_BOOK` to the generated file before starting the engine. Linux/macOS:
+
+```bash
+CHESS_BOT_BOOK=opening_book.bin python engine.py
+```
+
+PowerShell:
+
+```powershell
+$env:CHESS_BOT_BOOK = (Resolve-Path .\opening_book.bin).Path
+python engine.py
+```
+
+The external book is consulted first; if there is no matching legal entry the engine uses its built-in repertoire and then search. The book builder uses PGN move frequency, not engine quality—prefer high-quality games and check licensing before distributing book files.
+
+## Play against Stockfish
 
 Install Stockfish locally, then run:
 
 ```bash
-python tools/play_stockfish.py --stockfish /path/to/stockfish --games 2 --seconds 3
+python tools/play_stockfish.py --stockfish /path/to/stockfish --games 2 --seconds 3 --analysis-depth 12
 ```
 
-Windows example: `python tools/play_stockfish.py --stockfish "C:\\engines\\stockfish.exe" --games 2 --seconds 3`. The helper alternates colors, saves `stockfish_games.pgn`, and can add Stockfish review comments. For longer analysis use `--analysis-depth 14`. Share the PGN to diagnose particular mistakes.
+The helper alternates colors, saves `stockfish_games.pgn` and reports approximate move losses. Share the PGN to diagnose particular mistakes.
 
-## Improvements in this version
-
-- Compact built-in opening book: common e4, d4, c4 and Nf3 openings and several replies. It plays only positions covered by the repertoire; it is not a full opening database. Disable it in a GUI with `setoption name Use Book value false`.
-- Iterative deepening, alpha-beta, principal-variation search, aspiration windows, transposition table and null-move pruning.
-- Quiescence search checks captures and promotions; time and node limits are checked regularly.
-- Opening book is enabled by default and can be disabled through the UCI `Use Book` option.
-
-## Tests
+## Regression tests
 
 ```bash
 python -m unittest discover -s tests -v
+python tools/tactical_suite.py --depth 5
 ```
 
-The built-in book is a small curated baseline, not a substitute for a large verified opening database. Search depth still depends on available time, hardware and Python's speed; increase `--seconds` for longer games. The engine is experimental and is not claimed to match Stockfish strength.
+The tactical suite checks selected positions and is not an Elo rating. Search depth depends on time, hardware and Python speed; larger time limits can help analyze tactical errors. This is an experimental engine, not a claim of being stronger than Stockfish.
