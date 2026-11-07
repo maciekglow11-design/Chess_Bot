@@ -28,7 +28,7 @@ On Windows, pass the executable path, for example `--stockfish C:\\engines\\stoc
 python tools/play_stockfish.py --stockfish /path/to/stockfish --games 2 --depth 6 --analysis-depth 12
 ```
 
-The default PGN file is `stockfish_games.pgn`. Open it with a chess GUI or share it here. The post-game loss estimates are approximate and depend on the analysis depth; they are intended to locate positions worth investigating, not to prove a move is objectively bad. For a useful comparison, keep the same time/depth for both engines and let the match finish.
+The default PGN file is `stockfish_games.pgn`. Open it with a chess GUI or share it here. The post-game loss estimates compare Stockfish's evaluation before and after each Chess_Bot move at the selected analysis depth. They are approximate, not proof of an objectively bad move. Review comments are embedded in the PGN. For a useful comparison, use equal limits for both engines and let the match finish.
 
 ## Current engine features
 

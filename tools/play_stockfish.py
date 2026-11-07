@@ -6,7 +6,6 @@ from __future__ import annotations
 import argparse
 import sys
 from pathlib import Path
-from typing import Optional
 
 import chess
 import chess.engine
@@ -42,20 +41,27 @@ def score_cp(score: chess.engine.PovScore, color: chess.Color) -> int:
 
 def review_our_moves(stockfish: chess.engine.SimpleEngine, game: chess.pgn.Game,
                      our_color: chess.Color, depth: int) -> list[tuple[int, str, int, str]]:
-    """Return (ply, played move, centipawn loss, best move) for our moves."""
+    """Return (ply, played move, approximate loss cp, best move) for our moves."""
     board = game.board()
     mistakes = []
+    node = game
     for ply, move in enumerate(game.mainline_moves(), start=1):
         mover = board.turn
         if mover == our_color:
             before = stockfish.analyse(board, chess.engine.Limit(depth=depth))
             best_move = before.get("pv", [None])[0]
+            san = board.san(move)
             board.push(move)
             after = stockfish.analyse(board, chess.engine.Limit(depth=depth))
             loss = max(0, score_cp(before["score"], mover) - score_cp(after["score"], mover))
-            mistakes.append((ply, move.uci(), loss, best_move.uci() if best_move else "?"))
+            best_text = best_move.uci() if best_move else "?"
+            mistakes.append((ply, move.uci(), loss, best_text))
+            node = node.variation(move)
+            label = "BLUNDER" if loss >= 250 else "mistake" if loss >= 100 else "inaccuracy" if loss >= 50 else ""
+            node.comment = f"Stockfish review: played {san}; best {best_text}; approximate loss {loss} cp {label}".strip()
         else:
             board.push(move)
+            node = node.variation(move)
     return mistakes
 
 
@@ -86,11 +92,12 @@ def play_game(our_engine: chess.engine.SimpleEngine,
         board.push(move)
         node = node.add_variation(move)
         side = "Chess_Bot" if is_ours else "Stockfish"
-        print(f"Game {game_number}: {board.fullmove_number - (1 if board.turn == chess.BLACK else 0)}. {side}: {san} ({move.uci()})", flush=True)
+        print(f"Game {game_number}: {side}: {san} ({move.uci()})", flush=True)
 
     if board.is_game_over(claim_draw=True):
         game.headers["Result"] = board.result(claim_draw=True)
-        game.headers["Termination"] = board.outcome(claim_draw=True).termination.name
+        outcome = board.outcome(claim_draw=True)
+        game.headers["Termination"] = outcome.termination.name if outcome else "Game over"
     else:
         game.headers["Result"] = "1/2-1/2"
         game.headers["Termination"] = f"Move limit ({max_plies} plies)"
@@ -147,7 +154,6 @@ def main() -> None:
                     for ply, played, loss, best in mistakes:
                         label = "BLUNDER" if loss >= 250 else "mistake" if loss >= 100 else "inaccuracy" if loss >= 50 else ""
                         print(f"  ply {ply}: played {played}, best {best}, estimated loss {loss} cp {label}")
-                print(chess.pgn.StringExporter(headers=True, variations=True, comments=True).観(game) if False else "")
                 exporter = chess.pgn.StringExporter(headers=True, variations=True, comments=True)
                 pgn_file.write(game.accept(exporter) + "\n\n")
                 pgn_file.flush()
