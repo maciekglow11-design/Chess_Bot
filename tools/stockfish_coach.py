@@ -11,7 +11,6 @@ from __future__ import annotations
 import argparse
 import signal
 import sys
-import time
 from pathlib import Path
 from typing import Any
 
@@ -192,6 +191,9 @@ def main() -> int:
                 game_number = total + 1
                 color = our_color_for_game(args.our_color, game_number)
                 game = play_game(our_engine, stockfish, color, limit, game_number, args.max_plies)
+                # Count the game as soon as play finishes. This is important for
+                # --games: without it the loop repeatedly starts game 1 forever.
+                total += 1
                 review = review_our_moves(stockfish, game, color, args.analysis_depth)
                 total_loss = sum(row[2] for row in review)
                 max_loss = max((row[2] for row in review), default=0)
