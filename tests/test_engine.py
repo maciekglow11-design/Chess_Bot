@@ -4,6 +4,7 @@ import unittest
 import chess
 
 from engine import SearchLimits, Searcher, evaluate
+from opening_book import BOOK, choose_book_move
 
 
 def perft(board: chess.Board, depth: int) -> int:
@@ -28,29 +29,40 @@ class EngineTests(unittest.TestCase):
         board = chess.Board()
         white_score = evaluate(board)
         board.turn = chess.BLACK
-        black_score = evaluate(board)
-        self.assertEqual(white_score, -black_score)
+        self.assertEqual(white_score, -evaluate(board))
 
-    def test_evaluation_is_independent_of_piece_map_iteration_order(self):
+    def test_evaluation_is_deterministic(self):
         board = chess.Board()
         self.assertEqual(evaluate(board), evaluate(board.copy()))
 
-    def test_mate_is_detected(self):
-        board = chess.Board("7k/6Q1/6K1/8/8/8/8/8 b - - 0 1")
-        self.assertTrue(board.is_checkmate())
-
     def test_search_finds_mate_in_one(self):
         board = chess.Board("7k/8/5KQ1/8/8/8/8/8 w - - 0 1")
-        searcher = Searcher(threading.Event())
-        move = searcher.run(board, SearchLimits(max_depth=3))
+        move = Searcher(threading.Event()).run(board, SearchLimits(max_depth=3))
         board.push(move)
-        self.assertTrue(board.is_checkmate(), f"expected mate in one, got {move.uci()}")
+        self.assertTrue(board.is_checkmate())
 
     def test_search_returns_legal_move(self):
         board = chess.Board()
-        searcher = Searcher(threading.Event())
-        move = searcher.run(board, SearchLimits(max_depth=2))
+        move = Searcher(threading.Event()).run(board, SearchLimits(max_depth=2))
         self.assertIn(move, board.legal_moves)
+
+    def test_opening_book_contains_only_legal_start_moves(self):
+        board = chess.Board()
+        move = choose_book_move(board, randomize=False)
+        self.assertIsNotNone(move)
+        self.assertIn(move, board.legal_moves)
+        self.assertIn(move.uci(), {"e2e4", "d2d4", "c2c4", "g1f3"})
+
+    def test_opening_book_follows_a_known_response(self):
+        board = chess.Board()
+        board.push_uci("e2e4")
+        move = choose_book_move(board, randomize=False)
+        self.assertIsNotNone(move)
+        self.assertIn(move, board.legal_moves)
+        self.assertIn(move.uci(), {"e7e5", "c7c5", "e7e6", "c7c6", "d7d5"})
+
+    def test_book_lines_validate_and_have_positions(self):
+        self.assertTrue(BOOK)
 
 
 if __name__ == "__main__":

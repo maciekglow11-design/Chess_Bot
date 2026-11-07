@@ -1,6 +1,6 @@
 # Chess_Bot
 
-A zero-cost, open-source UCI chess engine project. The runnable Python engine uses `python-chess` for legal chess rules and provides a testable foundation for search and evaluation experiments.
+A zero-cost UCI chess engine project. The Python engine uses `python-chess` for legal move rules and has a compact built-in opening repertoire.
 
 ## Run the engine
 
@@ -11,35 +11,24 @@ python -m pip install -r requirements.txt
 python engine.py
 ```
 
-The program speaks UCI on standard input/output and can be loaded in a UCI-compatible GUI. It supports `uci`, `isready`, `ucinewgame`, `position startpos` / `position fen ...`, `go` with depth, node, clock or move-time limits, `stop`, and `quit`.
+Load it in a UCI-compatible chess GUI. The engine supports `uci`, `isready`, `position`, `go` with depth/node/clock limits, `stop`, and `quit`.
 
 ## Play against a local Stockfish
 
-Install Stockfish on your computer yourself, then run the match helper. It starts Chess_Bot and Stockfish as local UCI processes, alternates colors by default, prints the moves, reviews Chess_Bot's moves with Stockfish, and writes PGN for later review. It does not download Stockfish or use any paid service.
+Install Stockfish locally, then run:
 
 ```bash
-python -m pip install -r requirements.txt
-python tools/play_stockfish.py --stockfish /path/to/stockfish --games 2 --seconds 1
+python tools/play_stockfish.py --stockfish /path/to/stockfish --games 2 --seconds 3
 ```
 
-On Windows, pass the executable path, for example `--stockfish C:\\engines\\stockfish.exe`. To use a fixed depth instead of a time limit:
+Windows example: `python tools/play_stockfish.py --stockfish "C:\\engines\\stockfish.exe" --games 2 --seconds 3`. The helper alternates colors, saves `stockfish_games.pgn`, and can add Stockfish review comments. For longer analysis use `--analysis-depth 14`. Share the PGN to diagnose particular mistakes.
 
-```bash
-python tools/play_stockfish.py --stockfish /path/to/stockfish --games 2 --depth 6 --analysis-depth 12
-```
+## Improvements in this version
 
-The default PGN file is `stockfish_games.pgn`. Open it with a chess GUI or share it here. The post-game loss estimates compare Stockfish's evaluation before and after each Chess_Bot move at the selected analysis depth. They are approximate, not proof of an objectively bad move. Review comments are embedded in the PGN. For a useful comparison, use equal limits for both engines and let the match finish.
-
-## Current engine features
-
-- Legal moves, check, castling, en passant, promotion and draw rules through `python-chess`.
-- Iterative-deepening negamax with alpha-beta, principal-variation search and aspiration windows.
-- Quiescence search, null-move pruning, a transposition table with mate-distance scores, and PV output.
-- Move ordering using TT moves, captures, promotions, killer moves and history heuristic.
-- Evaluation for material, piece centralization, pawn structure, passed pawns, bishop pair and king placement.
-- UCI `Hash` and `Move Overhead` options; hash entries are retained between searches and cleared for a new game.
-
-The Python `Hash` setting is approximate entry capacity, not byte-accurate allocation. This is an experimental hobby engine, not a claim of being stronger than Stockfish. Python is useful for iteration, but its speed is far below a compiled engine.
+- Compact built-in opening book: common e4, d4, c4 and Nf3 openings and several replies. It plays only positions covered by the repertoire; it is not a full opening database. Disable it in a GUI with `setoption name Use Book value false`.
+- Iterative deepening, alpha-beta, principal-variation search, aspiration windows, transposition table and null-move pruning.
+- Quiescence search checks captures and promotions; time and node limits are checked regularly.
+- Opening book is enabled by default and can be disabled through the UCI `Use Book` option.
 
 ## Tests
 
@@ -47,4 +36,4 @@ The Python `Hash` setting is approximate entry capacity, not byte-accurate alloc
 python -m unittest discover -s tests -v
 ```
 
-Next, use the saved games and Stockfish's analysis to identify recurring tactical or positional failures. Fix one class of mistakes at a time and rerun tests and matches.
+The built-in book is a small curated baseline, not a substitute for a large verified opening database. Search depth still depends on available time, hardware and Python's speed; increase `--seconds` for longer games. The engine is experimental and is not claimed to match Stockfish strength.
