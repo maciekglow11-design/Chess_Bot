@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""A small UCI chess engine with alpha-beta search and a hand-crafted evaluation."""
+"""A small UCI chess engine with alpha-beta search and hand-crafted evaluation."""
 
 from __future__ import annotations
 
@@ -29,7 +29,11 @@ def evaluate(board: chess.Board) -> int:
     """Return a centipawn evaluation from the side-to-move's perspective."""
     score = 0
     pawns = {chess.WHITE: [], chess.BLACK: []}
-    non_pawn_material = 0
+    non_pawn_material = sum(
+        PIECE_VALUE[piece.piece_type]
+        for piece in board.piece_map().values()
+        if piece.piece_type not in (chess.PAWN, chess.KING)
+    )
 
     for square, piece in board.piece_map().items():
         color = piece.color
@@ -40,7 +44,7 @@ def evaluate(board: chess.Board) -> int:
         rank_index = chess.square_rank(square)
         relative_rank = rank_index if color == chess.WHITE else 7 - rank_index
         center_distance = abs(2 * file_index - 7) + abs(2 * rank_index - 7)
-        center = 14 - center_distance  # 0..14, higher near the center
+        center = 14 - center_distance
 
         score += sign * value
         if kind == chess.PAWN:
@@ -48,18 +52,13 @@ def evaluate(board: chess.Board) -> int:
             score += sign * (relative_rank * 7 + center * 2)
         elif kind == chess.KNIGHT:
             score += sign * center * 5
-            non_pawn_material += value
         elif kind == chess.BISHOP:
             score += sign * center * 3
-            non_pawn_material += value
         elif kind == chess.ROOK:
             score += sign * relative_rank * 2
-            non_pawn_material += value
         elif kind == chess.QUEEN:
             score += sign * center
-            non_pawn_material += value
         elif kind == chess.KING:
-            # Keep the king sheltered in the middlegame; centralize it in endings.
             if non_pawn_material < 2_000:
                 score += sign * center * 4
             else:
@@ -71,11 +70,11 @@ def evaluate(board: chess.Board) -> int:
         for file_index in range(8):
             count = files.count(file_index)
             if count > 1:
-                score -= sign * 12 * (count - 1)  # doubled pawns
+                score -= sign * 12 * (count - 1)
         for square in pawns[color]:
             file_index = chess.square_file(square)
             if not any(abs(other_file - file_index) == 1 for other_file in files):
-                score -= sign * 10  # isolated pawn
+                score -= sign * 10
             relative_rank = chess.square_rank(square) if color == chess.WHITE else 7 - chess.square_rank(square)
             enemy_pawns = pawns[not color]
             passed = True
@@ -88,11 +87,10 @@ def evaluate(board: chess.Board) -> int:
             if passed:
                 score += sign * (10 + relative_rank * relative_rank * 2)
 
-        bishops = board.pieces(chess.BISHOP, color)
-        if len(bishops) >= 2:
+        if len(board.pieces(chess.BISHOP, color)) >= 2:
             score += sign * 28
 
-    return (score if board.turn == chess.WHITE else -score) + 10  # tempo bonus
+    return (score if board.turn == chess.WHITE else -score) + 10
 
 
 def score_to_tt(score: int, ply: int) -> int:
@@ -123,11 +121,14 @@ class SearchStopped(Exception):
 
 
 class Searcher:
-    def __init__(self, stop_event: threading.Event, info_callback=None):
+    # TT flags: exact, lower bound, upper bound.
+    def __init__(self, stop_event: threading.Event, info_callback=None,
+                 tt: Optional[dict] = None, max_tt_entries: int = 24_000):
         self.stop_event = stop_event
         self.info_callback = info_callback
         self.nodes = 0
-        self.tt: dict[int, tuple[int, int, int, Optional[chess.Move]]] = {}
+        self.tt = tt if tt is not None else {}
+        self.max_tt_entries = max_tt_entries
         self.killers: dict[int, list[chess.Move]] = {}
         self.history: dict[tuple[bool, chess.Move], int] = {}
         self.pv: dict[int, list[chess.Move]] = {}
@@ -157,7 +158,6 @@ class Searcher:
             return 1_000_000 + PIECE_VALUE[move.promotion]
         if board.is_capture(move):
             victim = board.piece_at(move.to_square)
-            # En passant captures a pawn on a different square.
             victim_value = PIECE_VALUE[victim.piece_type] if victim else PIECE_VALUE[chess.PAWN]
             attacker = board.piece_at(move.from_square)
             attacker_value = PIECE_VALUE[attacker.piece_type] if attacker else 0
@@ -174,13 +174,14 @@ class Searcher:
 
     def quiescence(self, board: chess.Board, alpha: int, beta: int, ply: int, qply: int = 0) -> int:
         self.nodes += 1
-        if (self.nodes & 1023) == 0:
+        if (self.nodes & 255) == 0:
             self.check_stop()
         terminal = self.terminal_score(board, ply)
         if terminal is not None:
             return terminal
         in_check = board.is_check()
-        if qply >= 16:
+        # Never stand pat while in check: all legal evasions must be searched.
+        if qply >= 16 and not in_check:
             return evaluate(board)
         if not in_check:
             stand_pat = evaluate(board)
@@ -206,7 +207,7 @@ class Searcher:
 
     def negamax(self, board: chess.Board, depth: int, alpha: int, beta: int, ply: int) -> int:
         self.nodes += 1
-        if (self.nodes & 1023) == 0:
+        if (self.nodes & 255) == 0:
             self.check_stop()
         terminal = self.terminal_score(board, ply)
         if terminal is not None:
@@ -215,7 +216,9 @@ class Searcher:
             return self.quiescence(board, alpha, beta, ply)
 
         original_alpha = alpha
-        key = chess.polyglot zobrist_hash(board)
+        # Include the 50-move counter because it changes draw adjudication.
+        position_hash = chess.polyglot.zobrist_hash(board)
+        key = (position_hash, min(board.halfmove_clock, 100))
         tt_entry = self.tt.get(key)
         tt_move = None
         if tt_entry is not None:
@@ -224,17 +227,41 @@ class Searcher:
             if tt_depth >= depth:
                 if tt_flag == 0:
                     return tt_score
-                if tt_flag == 1 and tt_score >= beta:  # lower bound
+                if tt_flag == 1 and tt_score >= beta:
                     return tt_score
-                if tt_flag == 2 and tt_score <= alpha:  # upper bound
+                if tt_flag == 2 and tt_score <= alpha:
                     return tt_score
+
+        # Null-move pruning: skip a turn to detect positions that are clearly
+        # good enough to exceed beta. Disabled in check and pawn-only endings.
+        has_non_pawn_material = any(
+            board.pieces(piece_type, board.turn)
+            for piece_type in (chess.KNIGHT, chess.BISHOP, chess.ROOK, chess.QUEEN)
+        )
+        if depth >= 3 and not board.is_check() and has_non_pawn_material and beta < MATE_THRESHOLD:
+            reduction = 2 + depth // 6
+            board.push(chess.Move.null())
+            try:
+                null_score = -self.negamax(board, depth - 1 - reduction, -beta, -beta + 1, ply + 1)
+            finally:
+                board.pop()
+            if null_score >= beta:
+                return null_score
 
         best_score = -INF
         best_move = None
-        for move in self.ordered_moves(board, ply, tt_move):
+        moves = self.ordered_moves(board, ply, tt_move)
+        for move_index, move in enumerate(moves):
             board.push(move)
             try:
-                score = -self.negamax(board, depth - 1, -beta, -alpha, ply + 1)
+                if move_index == 0:
+                    score = -self.negamax(board, depth - 1, -beta, -alpha, ply + 1)
+                else:
+                    # Principal-variation search: scout later moves cheaply,
+                    # re-searching only if one improves the current alpha.
+                    score = -self.negamax(board, depth - 1, -alpha - 1, -alpha, ply + 1)
+                    if alpha < score < beta:
+                        score = -self.negamax(board, depth - 1, -beta, -alpha, ply + 1)
             finally:
                 board.pop()
             if score > best_score:
@@ -256,23 +283,31 @@ class Searcher:
         if best_move is None:
             return 0
         flag = 2 if best_score <= original_alpha else (1 if best_score >= beta else 0)
-        if len(self.tt) > 250_000:
+        if len(self.tt) >= self.max_tt_entries:
             self.tt.clear()
-        self.tt[key] = (depth, score_to_tt(best_score, ply), flag, best_move)
+        old_entry = self.tt.get(key)
+        if old_entry is None or depth >= old_entry[0] or flag == 0:
+            self.tt[key] = (depth, score_to_tt(best_score, ply), flag, best_move)
         return best_score
 
-    def search_root(self, board: chess.Board, depth: int) -> tuple[int, chess.Move, list[chess.Move]]:
-        alpha, beta = -INF, INF
+    def search_root(self, board: chess.Board, depth: int, alpha: int, beta: int):
+        original_alpha = alpha
         best_score = -INF
         best_move = next(iter(board.legal_moves))
-        root_key = chess.polyglot.zobrist_hash(board)
-        tt_entry = self.tt.get(root_key)
+        root_hash = (chess.polyglot.zobrist_hash(board), min(board.halfmove_clock, 100))
+        tt_entry = self.tt.get(root_hash)
         tt_move = tt_entry[3] if tt_entry else None
-        for move in self.ordered_moves(board, 0, tt_move):
+        moves = self.ordered_moves(board, 0, tt_move)
+        for move_index, move in enumerate(moves):
             self.check_stop()
             board.push(move)
             try:
-                score = -self.negamax(board, depth - 1, -beta, -alpha, 1)
+                if move_index == 0:
+                    score = -self.negamax(board, depth - 1, -beta, -alpha, 1)
+                else:
+                    score = -self.negamax(board, depth - 1, -alpha - 1, -alpha, 1)
+                    if alpha < score < beta:
+                        score = -self.negamax(board, depth - 1, -beta, -alpha, 1)
             finally:
                 board.pop()
             if score > best_score:
@@ -281,7 +316,10 @@ class Searcher:
                 self.pv[0] = [move] + self.pv.get(1, [])
             if score > alpha:
                 alpha = score
-        self.tt[root_key] = (depth, score_to_tt(best_score, 0), 0, best_move)
+            if alpha >= beta:
+                break
+        flag = 2 if best_score <= original_alpha else (1 if best_score >= beta else 0)
+        self.tt[root_hash] = (depth, score_to_tt(best_score, 0), flag, best_move)
         return best_score, best_move, self.pv.get(0, [best_move])
 
     def run(self, board: chess.Board, limits: SearchLimits) -> chess.Move:
@@ -291,13 +329,28 @@ class Searcher:
             return chess.Move.null()
         best_move = legal_moves[0]
         started = time.monotonic()
+        previous_score = 0
         for depth in range(1, limits.max_depth + 1):
+            window = 50 if depth > 1 else INF
+            alpha = max(-INF, previous_score - window)
+            beta = min(INF, previous_score + window)
             try:
-                self.pv.clear()
-                score, candidate, pv = self.search_root(board, depth)
+                while True:
+                    self.pv.clear()
+                    score, candidate, pv = self.search_root(board, depth, alpha, beta)
+                    if score <= alpha and alpha > -INF:
+                        window *= 2
+                        alpha = max(-INF, previous_score - window)
+                        continue
+                    if score >= beta and beta < INF:
+                        window *= 2
+                        beta = min(INF, previous_score + window)
+                        continue
+                    break
             except SearchStopped:
                 break
             best_move = candidate
+            previous_score = score
             elapsed_ms = max(1, int((time.monotonic() - started) * 1000))
             if self.info_callback:
                 self.info_callback(depth, score, self.nodes, elapsed_ms, pv)
@@ -311,6 +364,9 @@ _state_lock = threading.Lock()
 _board = chess.Board()
 _worker: Optional[threading.Thread] = None
 _stop_event: Optional[threading.Event] = None
+_hash_mb = 16
+_move_overhead_ms = 30
+_tt: dict = {}
 
 
 def send(line: str) -> None:
@@ -340,12 +396,14 @@ def parse_go(tokens: list[str]) -> SearchLimits:
     max_nodes = values.get("nodes")
     deadline = None
     if "movetime" in values:
-        deadline = time.monotonic() + max(0.01, values["movetime"] / 1000.0)
+        available_ms = max(1, values["movetime"] - _move_overhead_ms)
+        deadline = time.monotonic() + available_ms / 1000.0
     elif "infinite" not in values and ("wtime" in values or "btime" in values):
-        remaining = values.get("wtime" if _board.turn == chess.WHITE else "btime", 1_000)
-        increment = values.get("winc" if _board.turn == chess.WHITE else "binc", 0)
+        remaining = max(1, values.get("wtime" if _board.turn == chess.WHITE else "btime", 1_000))
+        increment = max(0, values.get("winc" if _board.turn == chess.WHITE else "binc", 0))
         moves_to_go = max(1, values.get("movestogo", 30))
-        allocation_ms = max(10, min(max(10, remaining - 50), remaining / moves_to_go + increment * 0.8))
+        usable = max(1, remaining - _move_overhead_ms)
+        allocation_ms = max(1, min(usable * 0.7, usable / moves_to_go + increment * 0.8))
         deadline = time.monotonic() + allocation_ms / 1000.0
     return SearchLimits(max_depth=max_depth, deadline=deadline, max_nodes=max_nodes)
 
@@ -383,7 +441,7 @@ def start_search(tokens: list[str]) -> None:
         send(f"info depth {depth} score {score_text} nodes {nodes} nps {nps} time {elapsed_ms} pv {pv_text}".rstrip())
 
     def work():
-        searcher = Searcher(event, report)
+        searcher = Searcher(event, report, _tt, max(1_000, _hash_mb * 1_500))
         best = searcher.run(board, limits)
         send(f"bestmove {best.uci()}")
 
@@ -413,8 +471,23 @@ def set_position(tokens: list[str]) -> None:
         send("info string Invalid position command")
 
 
+def set_option(tokens: list[str]) -> None:
+    global _hash_mb, _move_overhead_ms
+    try:
+        name_index = tokens.index("name") + 1
+        value_index = tokens.index("value")
+        name = " ".join(tokens[name_index:value_index]).lower()
+        value = int(tokens[value_index + 1])
+    except (ValueError, IndexError):
+        return
+    if name == "hash":
+        _hash_mb = max(1, min(value, 256))
+        _tt.clear()
+    elif name == "move overhead":
+        _move_overhead_ms = max(0, min(value, 5_000))
+
+
 def main() -> None:
-    global _board
     for raw_line in sys.stdin:
         line = raw_line.strip()
         if not line:
@@ -424,11 +497,14 @@ def main() -> None:
         if command == "uci":
             send("id name Chess_Bot Python")
             send("id author maciekglow11-design")
+            send("option name Hash type spin default 16 min 1 max 256")
+            send("option name Move Overhead type spin default 30 min 0 max 5000")
             send("uciok")
         elif command == "isready":
             send("readyok")
         elif command == "ucinewgame":
             stop_search()
+            _tt.clear()
         elif command == "position":
             stop_search()
             set_position(tokens)
@@ -440,8 +516,7 @@ def main() -> None:
             stop_search()
             break
         elif command == "setoption":
-            # No tunable UCI options are exposed yet; accept the command safely.
-            continue
+            set_option(tokens)
 
 
 if __name__ == "__main__":
