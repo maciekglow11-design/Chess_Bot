@@ -62,7 +62,9 @@ def _piece_mobility(board: chess.Board, color: chess.Color) -> int:
     total = 0
     for piece_type in (chess.KNIGHT, chess.BISHOP, chess.ROOK, chess.QUEEN):
         for square in board.pieces(piece_type, color):
-            total += chess.popcount(board.attacks(square) & ~own)
+            # chess.Board.attacks() returns a SquareSet; len() is the portable
+            # way to count its squares (chess.popcount() expects an integer bitboard).
+            total += len(board.attacks(square) & ~own)
     return total
 
 
@@ -103,7 +105,6 @@ def evaluate(board: chess.Board) -> int:
                 mg_score -= sign * 12
                 eg_score -= sign * 10
 
-            # Passed-pawn bonus grows sharply as the pawn approaches promotion.
             passed = not any(
                 abs(chess.square_file(enemy_sq) - file_index) <= 1
                 and chess.square_rank(_relative_square(enemy_sq, not color)) > 7 - rank_index
@@ -114,7 +115,6 @@ def evaluate(board: chess.Board) -> int:
                 mg_score += sign * bonus
                 eg_score += sign * (bonus * 2)
 
-            # Connected pawns support each other and are more useful in endings.
             if any(abs(chess.square_file(other) - file_index) == 1
                    and abs(chess.square_rank(_relative_square(other, color)) - rank_index) <= 1
                    for other in our_pawns if other != square):
@@ -135,8 +135,7 @@ def evaluate(board: chess.Board) -> int:
                 mg_score += sign * 12
                 eg_score += sign * 16
 
-        # Knight outposts: advanced, supported by a pawn, and not challengeable
-        # by an enemy pawn on an adjacent file.
+        # Knight outposts: advanced, supported, and not challengeable by pawns.
         for knight_square in board.pieces(chess.KNIGHT, color):
             rel = _relative_square(knight_square, color)
             rank_index = chess.square_rank(rel)
@@ -173,18 +172,17 @@ def evaluate(board: chess.Board) -> int:
             pressure = 0
             for enemy_square, enemy_piece in board.piece_map().items():
                 if enemy_piece.color != color and enemy_piece.piece_type != chess.KING:
-                    pressure += chess.popcount(board.attacks(enemy_square) & ring)
+                    # attacks() returns a SquareSet; count its intersection with
+                    # the king ring with len(), not chess.popcount().
+                    pressure += len(board.attacks(enemy_square) & ring)
             mg_score -= sign * min(36, pressure * 3)
 
-    # Mobility and hanging-piece penalties. These are deliberately modest and
-    # symmetric so they guide search rather than override tactical calculation.
     mg_score += 2 * (_piece_mobility(board, chess.WHITE) - _piece_mobility(board, chess.BLACK))
     for square, piece in board.piece_map().items():
         if piece.piece_type == chess.KING:
             continue
         color = piece.color
-        attackers = board.attackers(not color, square)
-        if not attackers:
+        if not board.attackers(not color, square):
             continue
         defenders = board.attackers(color, square)
         if not defenders:
@@ -372,8 +370,6 @@ class Searcher:
         if old is not None and old.depth > entry.depth and old.age == self.age and entry.flag != EXACT:
             return
         if len(self.tt) >= self.max_tt_entries and key not in self.tt:
-            # Selectively replace the stalest/shallowest entries instead of
-            # flushing all useful hash information at once.
             victims = sorted(self.tt, key=lambda item: (self.tt[item].age == self.age, self.tt[item].depth))
             for victim in victims[:max(1, self.max_tt_entries // 16)]:
                 del self.tt[victim]
@@ -407,7 +403,6 @@ class Searcher:
 
         original_alpha, original_beta = alpha, beta
         key = self.position_key(board)
-        # Repetition draws depend on the path, so don't reuse/store this node's TT score.
         path_dependent = board.is_repetition(2)
         entry = None if path_dependent else self.tt.get(key)
         tt_move = None
