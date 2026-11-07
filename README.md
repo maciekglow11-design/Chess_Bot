@@ -1,6 +1,6 @@
 # Chess_Bot
 
-A zero-cost, experimental UCI chess engine. It uses `python-chess` for legal move rules and supports a compact built-in opening repertoire plus optional Polyglot books.
+An experimental UCI chess engine written in Python. `python-chess` supplies legal move generation; this project implements the search and evaluation experiments.
 
 ## Run and test
 
@@ -10,29 +10,30 @@ python engine.py
 python -m unittest discover -s tests -v
 ```
 
-Load `engine.py` as a UCI engine in a chess GUI. UCI options: `Hash`, `Move Overhead`, and `Use Book`.
+Load the engine in a UCI-compatible GUI. Available UCI options: `Hash`, `Move Overhead`, and `Use Book`.
 
-## Improvements
+## Search and evaluation
 
-- Iterative deepening, alpha-beta, principal-variation search and aspiration windows.
-- Quiescence search, check extensions, late-move reductions, conservative null-move pruning, killer/history move ordering, and a bounded transposition table.
-- The TT position key includes the halfmove clock; search checks stop/time/node limits regularly.
-- Evaluation includes material, piece activity, pawn structure, passed pawns, bishop pair, rook activity, and a light king-cover term.
-- Opening book uses the built-in repertoire and optionally a Polyglot file configured by `CHESS_BOT_BOOK`.
+Current search experiments include iterative deepening, alpha-beta, principal-variation search, aspiration windows, quiescence search, check extensions, late-move reductions, conservative null-move pruning, transposition-table bounds with mate-distance normalization, killer/history/countermove ordering, and static exchange evaluation (SEE) for capture ordering and quiescence pruning. The evaluator covers material, piece activity, pawn structure, passed pawns, bishop pair, rook activity, and a light king-cover term.
 
-Generate a local Polyglot book from trusted PGNs (move frequency is not a quality score):
+These selective search techniques are approximations; they can miss tactics. Regression tests and matches are essential, and a feature is not automatically stronger merely because it is more sophisticated.
+
+## Opening book
+
+A small built-in repertoire is enabled by default. A larger optional Polyglot book can be selected with `CHESS_BOT_BOOK=/path/to/book.bin`. A PGN-to-Polyglot utility is available:
 
 ```bash
 python tools/build_opening_book.py games.pgn --output opening_book.bin --max-plies 24 --min-frequency 2
 ```
 
-Linux/macOS: `CHESS_BOT_BOOK=opening_book.bin python engine.py`.
-PowerShell: `$env:CHESS_BOT_BOOK = (Resolve-Path .\opening_book.bin).Path; python engine.py`.
+Frequency alone does not measure move quality; use reliable, legally shareable PGNs.
 
-## Test against Stockfish
+## Play against Stockfish
+
+Install Stockfish locally, then run:
 
 ```bash
 python tools/play_stockfish.py --stockfish /path/to/stockfish --games 4 --seconds 3 --analysis-depth 12
 ```
 
-The engine is a learning project and is nowhere near grandmaster or Stockfish strength yet. Treat each search/evaluation improvement as a hypothesis: run the regression tests and multiple games at equal settings before deciding it made the engine stronger.
+This is a learning project and is not close to grandmaster or Stockfish strength. Improve it through measured changes: run tests, play multiple games at equal settings, and inspect the resulting PGNs.

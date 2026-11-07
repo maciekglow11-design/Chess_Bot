@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Experimental UCI chess engine: opening book, alpha-beta and tactical search."""
+"""Experimental UCI chess engine with opening book and tactical search."""
 
 from __future__ import annotations
 
@@ -24,12 +24,57 @@ PIECE_VALUE = {
     chess.BISHOP: 335,
     chess.ROOK: 500,
     chess.QUEEN: 900,
-    chess.KING: 0,
+    chess.KING: 20_000,
 }
 
 
+def static_exchange_eval(board: chess.Board, move: chess.Move) -> int:
+    """Approximate material balance of a capture sequence on move.to_square."""
+    if not board.is_capture(move) and not move.promotion:
+        return 0
+
+    if board.is_en_passant(move):
+        captured_square = move.to_square - 8 if board.turn == chess.WHITE else move.to_square + 8
+        victim = board.piece_at(captured_square)
+    else:
+        victim = board.piece_at(move.to_square)
+    gain = [PIECE_VALUE[victim.piece_type] if victim else 0]
+    if move.promotion:
+        gain[0] += PIECE_VALUE[move.promotion] - PIECE_VALUE[chess.PAWN]
+
+    position = board.copy(stack=False)
+    position.push(move)
+    target = move.to_square
+    occupant = position.piece_at(target)
+    if occupant is None:
+        return gain[0]
+    side = position.turn
+
+    # Repeatedly exchange on the target square using the least valuable attacker.
+    # This is intentionally a fast ordering estimate, not full legal SEE.
+    for _ in range(30):
+        attackers = position.attackers(side, target)
+        if not attackers:
+            break
+        attacker_square = min(
+            attackers,
+            key=lambda sq: (PIECE_VALUE[position.piece_at(sq).piece_type], sq),
+        )
+        attacker = position.piece_at(attacker_square)
+        gain.append(PIECE_VALUE[occupant.piece_type] - gain[-1])
+        position.remove_piece_at(target)
+        position.remove_piece_at(attacker_square)
+        position.set_piece_at(target, attacker)
+        occupant = attacker
+        side = not side
+
+    for index in range(len(gain) - 1, 0, -1):
+        gain[index - 1] = -max(-gain[index - 1], gain[index])
+    return gain[0]
+
+
 def evaluate(board: chess.Board) -> int:
-    """Simple side-to-move evaluation in centipawns."""
+    """Return a simple side-to-move positional score in centipawns."""
     score = 0
     pawns = {chess.WHITE: [], chess.BLACK: []}
     non_pawn_material = sum(
@@ -46,7 +91,6 @@ def evaluate(board: chess.Board) -> int:
         relative_rank = rank_index if color == chess.WHITE else 7 - rank_index
         center = 14 - abs(2 * file_index - 7) - abs(2 * rank_index - 7)
         score += sign * PIECE_VALUE[kind]
-
         if kind == chess.PAWN:
             pawns[color].append(square)
             score += sign * (relative_rank * 7 + center * 2)
@@ -61,7 +105,6 @@ def evaluate(board: chess.Board) -> int:
         elif kind == chess.QUEEN:
             score += sign * center
         elif kind == chess.KING:
-            # Keep the king sheltered while queens/rooks remain; activate it later.
             score += sign * (center * 4 if non_pawn_material < 2_000 else -center * 3)
 
     for color in (chess.WHITE, chess.BLACK):
@@ -74,21 +117,18 @@ def evaluate(board: chess.Board) -> int:
         for square in pawns[color]:
             file_index = chess.square_file(square)
             if not any(abs(other_file - file_index) == 1 for other_file in files):
-                score -= sign * 10  # isolated pawn
+                score -= sign * 10
             relative_rank = chess.square_rank(square) if color == chess.WHITE else 7 - chess.square_rank(square)
-            enemy_pawns = pawns[not color]
             passed = not any(
                 abs(chess.square_file(enemy_sq) - file_index) <= 1
                 and (chess.square_rank(enemy_sq) if color == chess.WHITE else 7 - chess.square_rank(enemy_sq)) > relative_rank
-                for enemy_sq in enemy_pawns
+                for enemy_sq in pawns[not color]
             )
             if passed:
                 score += sign * (10 + relative_rank * relative_rank * 2)
         if len(board.pieces(chess.BISHOP, color)) >= 2:
             score += sign * 28
 
-        # A small king-cover term: penalize missing friendly pawns in front of
-        # the king in the middlegame, without replacing tactical search.
         king = board.king(color)
         if king is not None and non_pawn_material >= 2_000:
             forward = 1 if color == chess.WHITE else -1
@@ -101,8 +141,7 @@ def evaluate(board: chess.Board) -> int:
                         cover += 1
             score += sign * (cover * 5 - (3 - cover) * 4)
 
-    white_score = score
-    return (white_score if board.turn == chess.WHITE else -white_score) + 10
+    return (score if board.turn == chess.WHITE else -score) + 10
 
 
 def score_to_tt(score: int, ply: int) -> int:
@@ -142,6 +181,7 @@ class Searcher:
         self.max_tt_entries = max_tt_entries
         self.killers: dict[int, list[chess.Move]] = {}
         self.history: dict[tuple[bool, chess.Move], int] = {}
+        self.countermoves: dict[tuple[bool, int, int], chess.Move] = {}
         self.pv: dict[int, list[chess.Move]] = {}
         self.limits = SearchLimits()
 
@@ -155,7 +195,6 @@ class Searcher:
 
     @staticmethod
     def position_key(board: chess.Board) -> tuple[int, int]:
-        # Halfmove clock affects 50-move draw claims, so include it in TT key.
         return chess.polyglot.zobrist_hash(board), min(board.halfmove_clock, 100)
 
     def terminal_score(self, board: chess.Board, ply: int) -> Optional[int]:
@@ -175,9 +214,8 @@ class Searcher:
         if board.is_capture(move):
             victim = board.piece_at(move.to_square)
             victim_value = PIECE_VALUE[victim.piece_type] if victim else PIECE_VALUE[chess.PAWN]
-            attacker = board.piece_at(move.from_square)
-            attacker_value = PIECE_VALUE[attacker.piece_type] if attacker else 0
-            score = 1_000_000 + victim_value * 10 - attacker_value
+            exchange = static_exchange_eval(board, move)
+            score = 1_000_000 + exchange * 100 + victim_value
             if board.gives_check(move):
                 score += 50_000
             return score
@@ -186,6 +224,11 @@ class Searcher:
         killers = self.killers.get(ply, [])
         if move in killers:
             return 800_000 - killers.index(move)
+        if len(board.move_stack) >= 1:
+            previous = board.peek()
+            counter = self.countermoves.get((board.turn, previous.from_square, previous.to_square))
+            if move == counter:
+                return 750_000
         return self.history.get((board.turn, move), 0)
 
     def ordered_moves(self, board: chess.Board, ply: int, tt_move=None):
@@ -203,8 +246,6 @@ class Searcher:
         if qply >= 16:
             if not in_check:
                 return evaluate(board)
-            # Do not stand pat in check. At the safety cap, evaluate each legal
-            # evasion once (mate is still detected at the next node).
             evasions = list(board.legal_moves)
             if not evasions:
                 return -MATE + ply
@@ -223,11 +264,16 @@ class Searcher:
             if stand_pat >= beta:
                 return beta
             alpha = max(alpha, stand_pat)
-            moves = [m for m in board.legal_moves if board.is_capture(m) or m.promotion]
+            moves = [m for m in board.legal_moves if m.is_capture() or m.promotion]
         else:
             moves = list(board.legal_moves)
 
         for move in sorted(moves, key=lambda m: self.move_order_score(board, m, ply, None), reverse=True):
+            # Delta/SEE pruning discards clearly losing, non-checking captures in
+            # quiet positions. Promotions and checks are always searched.
+            if not in_check and not move.promotion and not board.gives_check(move):
+                if static_exchange_eval(board, move) < -180:
+                    continue
             board.push(move)
             try:
                 value = -self.quiescence(board, -beta, -alpha, ply + 1, qply + 1)
@@ -243,11 +289,20 @@ class Searcher:
             return False
         if board.move_stack and board.peek().is_null():
             return False
-        # Avoid common zugzwang cases: require a rook/queen or at least two minors.
-        own = board.occupied_co[board.turn]
         rooks_queens = board.pieces_mask(chess.ROOK, board.turn) | board.pieces_mask(chess.QUEEN, board.turn)
         minors = board.pieces_mask(chess.KNIGHT, board.turn) | board.pieces_mask(chess.BISHOP, board.turn)
-        return bool(own and (rooks_queens or chess.popcount(minors) >= 2))
+        return bool(rooks_queens or chess.popcount(minors) >= 2)
+
+    def _remember_quiet_cutoff(self, board: chess.Board, move: chess.Move, ply: int, depth: int) -> None:
+        killers = self.killers.setdefault(ply, [])
+        if move not in killers:
+            killers.insert(0, move)
+            del killers[2:]
+        history_key = (board.turn, move)
+        self.history[history_key] = min(100_000, self.history.get(history_key, 0) + depth * depth)
+        if len(board.move_stack) >= 1:
+            previous = board.peek()
+            self.countermoves[(board.turn, previous.from_square, previous.to_square)] = move
 
     def negamax(self, board: chess.Board, depth: int, alpha: int, beta: int, ply: int) -> int:
         self.nodes += 1
@@ -293,7 +348,7 @@ class Searcher:
                 if index == 0:
                     value = -self.negamax(board, depth - 1, -beta, -alpha, ply + 1)
                 else:
-                    reduction = 1 if depth >= 3 and index >= 3 and quiet and not gives_check and not board.is_check() else 0
+                    reduction = 1 if depth >= 3 and index >= 3 and quiet and not gives_check else 0
                     value = -self.negamax(board, depth - 1 - reduction, -alpha - 1, -alpha, ply + 1)
                     if value > alpha and reduction:
                         value = -self.negamax(board, depth - 1, -alpha - 1, -alpha, ply + 1)
@@ -309,19 +364,13 @@ class Searcher:
             alpha = max(alpha, value)
             if alpha >= beta:
                 if quiet:
-                    killers = self.killers.setdefault(ply, [])
-                    if move not in killers:
-                        killers.insert(0, move)
-                        del killers[2:]
-                    history_key = (board.turn, move)
-                    self.history[history_key] = min(100_000, self.history.get(history_key, 0) + depth * depth)
+                    self._remember_quiet_cutoff(board, move, ply, depth)
                 break
 
         if best_move is None:
             return 0
         flag = UPPER if best_score <= original_alpha else LOWER if best_score >= beta else EXACT
         if len(self.tt) >= self.max_tt_entries:
-            # Simple bounded replacement: keep memory under control.
             self.tt.clear()
         old = self.tt.get(key)
         if old is None or depth >= old[0] or flag == EXACT:
@@ -456,10 +505,10 @@ def start_search(tokens: list[str]) -> None:
     with _state_lock:
         board = _board.copy(stack=True)
     if _use_book:
-        move = choose_book_move(board)
-        if move is not None:
-            send(f"info string opening book move {move.uci()}")
-            send(f"bestmove {move.uci()}")
+        book_move = choose_book_move(board)
+        if book_move is not None:
+            send(f"info string opening book move {book_move.uci()}")
+            send(f"bestmove {book_move.uci()}")
             return
     limits = parse_go(tokens, board)
     event = threading.Event()

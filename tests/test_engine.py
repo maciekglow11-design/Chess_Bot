@@ -3,7 +3,7 @@ import unittest
 
 import chess
 
-from engine import SearchLimits, Searcher, evaluate
+from engine import SearchLimits, Searcher, evaluate, static_exchange_eval
 from opening_book import choose_book_move
 
 
@@ -37,23 +37,35 @@ class EngineTests(unittest.TestCase):
         board.push(move)
         self.assertTrue(board.is_checkmate())
 
-    def test_search_finds_a_legal_move_when_checked(self):
+    def test_search_returns_legal_move_when_checked(self):
         board = chess.Board("4k3/8/8/8/8/8/4r3/4K3 w - - 0 1")
         move = Searcher(threading.Event()).run(board, SearchLimits(max_depth=2))
         self.assertIn(move, board.legal_moves)
 
-    def test_search_respects_node_limit_and_returns_move(self):
+    def test_search_respects_node_limit(self):
         board = chess.Board()
         move = Searcher(threading.Event()).run(board, SearchLimits(max_depth=8, max_nodes=2_000))
         self.assertIn(move, board.legal_moves)
 
-    def test_book_move_is_legal(self):
+    def test_opening_move_is_legal(self):
         board = chess.Board()
         move = choose_book_move(board, randomize=False)
         self.assertIsNotNone(move)
         self.assertIn(move, board.legal_moves)
 
-    def test_evaluation_deterministic(self):
+    def test_static_exchange_detects_poisoned_queen_capture(self):
+        board = chess.Board("k3r3/8/8/4p3/4Q3/8/8/K7 w - - 0 1")
+        move = chess.Move.from_uci("e4e5")
+        self.assertIn(move, board.legal_moves)
+        self.assertLess(static_exchange_eval(board, move), 0)
+
+    def test_static_exchange_values_unprotected_pawn_capture(self):
+        board = chess.Board("k7/8/8/4p3/4Q3/8/8/K7 w - - 0 1")
+        move = chess.Move.from_uci("e4e5")
+        self.assertIn(move, board.legal_moves)
+        self.assertGreater(static_exchange_eval(board, move), 0)
+
+    def test_evaluation_is_deterministic(self):
         board = chess.Board()
         self.assertEqual(evaluate(board), evaluate(board.copy()))
 
