@@ -3,7 +3,7 @@ import unittest
 
 import chess
 
-from engine import SearchLimits, Searcher, evaluate, static_exchange_eval
+from engine import SearchLimits, Searcher, evaluate, parse_go, score_from_tt, score_to_tt
 from opening_book import choose_book_move
 
 
@@ -25,11 +25,20 @@ class EngineTests(unittest.TestCase):
         self.assertEqual(perft(board, 2), 400)
         self.assertEqual(perft(board, 3), 8902)
 
-    def test_evaluation_is_side_to_move_relative(self):
+    def test_evaluation_is_symmetric_when_side_to_move_changes(self):
         board = chess.Board()
-        white_score = evaluate(board)
+        score = evaluate(board)
         board.turn = chess.BLACK
-        self.assertEqual(white_score, -evaluate(board))
+        self.assertEqual(score, -evaluate(board))
+
+    def test_evaluation_is_deterministic(self):
+        board = chess.Board()
+        self.assertEqual(evaluate(board), evaluate(board.copy()))
+
+    def test_evaluation_rewards_rook_on_open_file(self):
+        open_file = chess.Board("7k/8/8/8/8/8/8/KR6 w - - 0 1")
+        blocked_file = chess.Board("7k/8/8/8/8/8/P7/KR6 w - - 0 1")
+        self.assertGreater(evaluate(open_file), evaluate(blocked_file))
 
     def test_search_finds_mate_in_one(self):
         board = chess.Board("7k/8/5KQ1/8/8/8/8/8 w - - 0 1")
@@ -37,7 +46,7 @@ class EngineTests(unittest.TestCase):
         board.push(move)
         self.assertTrue(board.is_checkmate())
 
-    def test_search_returns_legal_move_when_checked(self):
+    def test_search_returns_legal_evasion(self):
         board = chess.Board("4k3/8/8/8/8/8/4r3/4K3 w - - 0 1")
         move = Searcher(threading.Event()).run(board, SearchLimits(max_depth=2))
         self.assertIn(move, board.legal_moves)
@@ -47,27 +56,23 @@ class EngineTests(unittest.TestCase):
         move = Searcher(threading.Event()).run(board, SearchLimits(max_depth=8, max_nodes=2_000))
         self.assertIn(move, board.legal_moves)
 
-    def test_opening_move_is_legal(self):
+    def test_book_move_is_legal(self):
         board = chess.Board()
         move = choose_book_move(board, randomize=False)
         self.assertIsNotNone(move)
         self.assertIn(move, board.legal_moves)
 
-    def test_static_exchange_detects_poisoned_queen_capture(self):
-        board = chess.Board("k3r3/8/8/4p3/4Q3/8/8/K7 w - - 0 1")
-        move = chess.Move.from_uci("e4e5")
-        self.assertIn(move, board.legal_moves)
-        self.assertLess(static_exchange_eval(board, move), 0)
+    def test_mate_scores_round_trip_through_tt(self):
+        for ply in (0, 1, 7, 20):
+            for score in (29_990, -29_990, 123, -450):
+                self.assertEqual(score_from_tt(score_to_tt(score, ply), ply), score)
 
-    def test_static_exchange_values_unprotected_pawn_capture(self):
-        board = chess.Board("k7/8/8/4p3/4Q3/8/8/K7 w - - 0 1")
-        move = chess.Move.from_uci("e4e5")
-        self.assertIn(move, board.legal_moves)
-        self.assertGreater(static_exchange_eval(board, move), 0)
-
-    def test_evaluation_is_deterministic(self):
+    def test_clock_go_limit_uses_position_side_to_move(self):
         board = chess.Board()
-        self.assertEqual(evaluate(board), evaluate(board.copy()))
+        board.push_uci("e2e4")
+        limits = parse_go(["go", "wtime", "10000", "btime", "1000", "winc", "0", "binc", "0"], board)
+        self.assertIsNotNone(limits.deadline)
+        self.assertLess(limits.deadline - __import__("time").monotonic(), 2.0)
 
 
 if __name__ == "__main__":

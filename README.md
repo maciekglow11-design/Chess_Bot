@@ -1,6 +1,6 @@
 # Chess_Bot
 
-An experimental UCI chess engine written in Python. `python-chess` supplies legal move generation; this project implements the search and evaluation experiments.
+A zero-cost, experimental UCI chess engine. `python-chess` supplies legal move generation; this project implements evaluation, search, opening-book selection, and tools for testing.
 
 ## Run and test
 
@@ -10,30 +10,33 @@ python engine.py
 python -m unittest discover -s tests -v
 ```
 
-Load the engine in a UCI-compatible GUI. Available UCI options: `Hash`, `Move Overhead`, and `Use Book`.
+Load `engine.py` in any UCI-compatible GUI. UCI options: `Hash`, `Move Overhead`, `Use Book`, and `SyzygyPath`.
 
-## Search and evaluation
+## New evaluation and search work
 
-Current search experiments include iterative deepening, alpha-beta, principal-variation search, aspiration windows, quiescence search, check extensions, late-move reductions, conservative null-move pruning, transposition-table bounds with mate-distance normalization, killer/history/countermove ordering, and static exchange evaluation (SEE) for capture ordering and quiescence pruning. The evaluator covers material, piece activity, pawn structure, passed pawns, bishop pair, rook activity, and a light king-cover term.
+- Phase-aware middlegame/endgame piece-square terms for every piece.
+- Evaluation includes material, piece activity/mobility, doubled/isolated/connected/passed pawns, bishop pair, open and semi-open rook files, seventh-rank rooks, knight outposts, king shelter, and nearby king pressure.
+- Correct side-to-move score symmetry: no asymmetric tempo constant is added.
+- Search uses iterative deepening, alpha-beta, PVS, aspiration windows, quiescence, check extensions, late-move reductions, conservative null-move pruning, killer/history/countermove ordering, and a generation-aware transposition table with selective replacement.
+- Repetition-sensitive nodes are not stored/reused in the transposition table; the halfmove clock is part of the key.
+- Optional Syzygy probing for positions with at most seven pieces. Configure the folder containing Syzygy table files through `setoption name SyzygyPath value /path/to/syzygy` in a UCI GUI. Table files are not included.
 
-These selective search techniques are approximations; they can miss tactics. Regression tests and matches are essential, and a feature is not automatically stronger merely because it is more sophisticated.
+Search pruning is selective and can still miss tactics. The optional Syzygy feature only applies when the necessary local table files are present. These additions do not make a Python project grandmaster- or Stockfish-strength; measure changes with tests and paired games.
 
 ## Opening book
 
-A small built-in repertoire is enabled by default. A larger optional Polyglot book can be selected with `CHESS_BOT_BOOK=/path/to/book.bin`. A PGN-to-Polyglot utility is available:
+The built-in repertoire is enabled by default. Generate an optional Polyglot book from trusted PGNs (move frequency is not a quality score):
 
 ```bash
 python tools/build_opening_book.py games.pgn --output opening_book.bin --max-plies 24 --min-frequency 2
 ```
 
-Frequency alone does not measure move quality; use reliable, legally shareable PGNs.
+Set `CHESS_BOT_BOOK` to the generated file before starting the engine.
 
-## Play against Stockfish
-
-Install Stockfish locally, then run:
+## Match against local Stockfish
 
 ```bash
 python tools/play_stockfish.py --stockfish /path/to/stockfish --games 4 --seconds 3 --analysis-depth 12
 ```
 
-This is a learning project and is not close to grandmaster or Stockfish strength. Improve it through measured changes: run tests, play multiple games at equal settings, and inspect the resulting PGNs.
+The helper saves PGN and provides approximate move-loss reports. The engine is a learning project; evaluate strength through repeatable tournaments, not feature count.
