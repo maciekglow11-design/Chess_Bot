@@ -1,19 +1,40 @@
+- Added optional engine style profiles (`balanced`, `aggressive`, `solid`, `endgame`) in `engine.py`.
+- Added stockfish coaching loop script `tools/stockfish_coach.py` for repeated games and review logs.
+- Added `tools/coach_analysis.py` to summarize recurring mistakes from the coaching CSV.
+- Added `tests/test_stockfish_coach.py` for coaching assumptions and defaults.
 
+## Engine styles
 
-## Continuous Stockfish coach (optional)
+The engine exposes a UCI option:
 
-Run repeated games until Ctrl+C, with Stockfish used only as the opponent and post-game reviewer:
+```text
+setoption name Style value aggressive
+```
+
+Available profiles:
+- `balanced`: stable default
+- `aggressive`: prioritizes initiative, mobility, queen activity, and attacking chances
+- `solid`: stronger king safety and pawn structure discipline
+- `endgame`: stronger passed-pawn and rook/endgame evaluation
+
+This keeps the bot recognizable and not a Stockfish clone: the style is internal heuristics, not a move oracle from Stockfish.
+
+## Coaching loop
 
 ```bash
 python tools/stockfish_coach.py --stockfish /path/to/stockfish --loop --seconds 1 --analysis-depth 10
 ```
 
-For a finite batch, use `--games 20` without `--loop`. The tool alternates colors by default and stores:
+The running mode will:
+- play repeated games against Stockfish
+- review each Chess_Bot move with Stockfish analysis
+- store good games to `training/strong_games.pgn`
+- save a statistical CSV and JSONL dataset for later tuning
 
-- `training/strong_games.pgn`: only games meeting the result and largest-move-loss filters (defaults: draw/win and at most 150 cp loss).
-- `training/move_review.csv`: each Chess_Bot move, Stockfish's suggested move, and approximate centipawn loss.
-- `training/coach_positions.jsonl`: labeled position examples for later experiments.
+## Summarize mistakes
 
-This is coaching data collection, not automatic engine training. Stockfish analysis does not feed moves to Chess_Bot during play and does not alter its source, evaluation, or search, so the bot does not become a Stockfish copy. To include losses that meet the blunder filter, set `--min-result-score 0`. The measured loss is an approximate depth-limited estimate, not a proof of move quality. Review collected games and tune/test the bot's own heuristics separately before incorporating any changes.
+```bash
+python tools/coach_analysis.py training/move_review.csv --json training/summary.json
+```
 
-Run the test suite with `python -m unittest discover -s tests -v`.
+This highlights recurring mistakes and the positions to improve.

@@ -30,6 +30,9 @@ PIECE_VALUE = {
 PHASE_VALUE = {chess.KNIGHT: 1, chess.BISHOP: 1, chess.ROOK: 2, chess.QUEEN: 4}
 MAX_PHASE = 24
 
+_ENGINE_STYLE = "balanced"
+_VALID_STYLES = {"balanced", "aggressive", "solid", "endgame"}
+
 
 def _relative_square(square: chess.Square, color: chess.Color) -> chess.Square:
     return square if color == chess.WHITE else square ^ 56
@@ -64,6 +67,36 @@ def _piece_mobility(board: chess.Board, color: chess.Color) -> int:
         for square in board.pieces(piece_type, color):
             total += chess.popcount(board.attacks(square) & ~own)
     return total
+
+
+def _effective_style() -> str:
+    return _ENGINE_STYLE if _ENGINE_STYLE in _VALID_STYLES else "balanced"
+
+
+def _apply_style_profile(board: chess.Board, score: int) -> int:
+    style = _effective_style()
+    phase = 0
+    for piece in board.piece_map().values():
+        phase += PHASE_VALUE.get(piece.piece_type, 0)
+    phase = min(MAX_PHASE, phase)
+    if style == "aggressive":
+        score += 12 * (board.turn == chess.WHITE) * (not board.is_check())
+        score += 6 * (_piece_mobility(board, chess.WHITE) - _piece_mobility(board, chess.BLACK))
+        score += 10 if board.is_attacked_by(chess.WHITE, board.king(chess.BLACK)) else 0
+        score += 7 * len(board.pieces(chess.QUEEN, chess.WHITE))
+        if phase < 12:
+            score += 10 * len(board.pieces(chess.PAWN, chess.WHITE))
+    elif style == "solid":
+        score += 18 * (board.is_check() and board.turn == chess.BLACK)
+        score += 8 * (board.is_attacked_by(chess.BLACK, board.king(chess.WHITE)))
+        score += 12 * (len(board.pieces(chess.PAWN, chess.WHITE)) - len(board.pieces(chess.PAWN, chess.BLACK)))
+        score -= 5 * (_piece_mobility(board, chess.BLACK) - _piece_mobility(board, chess.WHITE))
+    elif style == "endgame":
+        if board.occupied_bitboard().bit_count() <= 12:
+            score += 18 * (len(board.pieces(chess.PAWN, chess.WHITE)) - len(board.pieces(chess.PAWN, chess.BLACK)))
+            score += 12 * (len(board.pieces(chess.QUEEN, chess.WHITE)) - len(board.pieces(chess.QUEEN, chess.BLACK)))
+            score += 5 * (_piece_mobility(board, chess.WHITE) - _piece_mobility(board, chess.BLACK))
+    return score
 
 
 def evaluate(board: chess.Board) -> int:
@@ -103,7 +136,6 @@ def evaluate(board: chess.Board) -> int:
                 mg_score -= sign * 12
                 eg_score -= sign * 10
 
-            # Passed-pawn bonus grows sharply as the pawn approaches promotion.
             passed = not any(
                 abs(chess.square_file(enemy_sq) - file_index) <= 1
                 and chess.square_rank(_relative_square(enemy_sq, not color)) > 7 - rank_index
@@ -114,7 +146,6 @@ def evaluate(board: chess.Board) -> int:
                 mg_score += sign * bonus
                 eg_score += sign * (bonus * 2)
 
-            # Connected pawns support each other and are more useful in endings.
             if any(abs(chess.square_file(other) - file_index) == 1
                    and abs(chess.square_rank(_relative_square(other, color)) - rank_index) <= 1
                    for other in our_pawns if other != square):
@@ -126,7 +157,6 @@ def evaluate(board: chess.Board) -> int:
             mg_score += sign * 28
             eg_score += sign * 40
 
-        # Open/semi-open rook files and a seventh-rank rook.
         for rook_square in board.pieces(chess.ROOK, color):
             file_index = chess.square_file(rook_square)
             if not any(chess.square_file(p) == file_index for p in our_pawns):
@@ -135,8 +165,6 @@ def evaluate(board: chess.Board) -> int:
                 mg_score += sign * 12
                 eg_score += sign * 16
 
-        # Knight outposts: advanced, supported by a pawn, and not challengeable
-        # by an enemy pawn on an adjacent file.
         for knight_square in board.pieces(chess.KNIGHT, color):
             rel = _relative_square(knight_square, color)
             rank_index = chess.square_rank(rel)
@@ -155,7 +183,6 @@ def evaluate(board: chess.Board) -> int:
                 mg_score += sign * 18
                 eg_score += sign * 12
 
-        # King pawn shield and nearby enemy pressure, only in the middlegame.
         king = board.king(color)
         if king is not None and phase >= 8:
             king_file, king_rank = chess.square_file(king), chess.square_rank(king)
@@ -176,8 +203,6 @@ def evaluate(board: chess.Board) -> int:
                     pressure += chess.popcount(board.attacks(enemy_square) & ring)
             mg_score -= sign * min(36, pressure * 3)
 
-    # Mobility and hanging-piece penalties. These are deliberately modest and
-    # symmetric so they guide search rather than override tactical calculation.
     mg_score += 2 * (_piece_mobility(board, chess.WHITE) - _piece_mobility(board, chess.BLACK))
     for square, piece in board.piece_map().items():
         if piece.piece_type == chess.KING:
@@ -192,7 +217,8 @@ def evaluate(board: chess.Board) -> int:
             mg_score += -penalty if color == chess.WHITE else penalty
 
     blended = (mg_score * phase + eg_score * (MAX_PHASE - phase)) // MAX_PHASE
-    return blended if board.turn == chess.WHITE else -blended
+    score = blended if board.turn == chess.WHITE else -blended
+    return _apply_style_profile(board, score)
 
 
 def score_to_tt(score: int, ply: int) -> int:
@@ -372,8 +398,6 @@ class Searcher:
         if old is not None and old.depth > entry.depth and old.age == self.age and entry.flag != EXACT:
             return
         if len(self.tt) >= self.max_tt_entries and key not in self.tt:
-            # Selectively replace the stalest/shallowest entries instead of
-            # flushing all useful hash information at once.
             victims = sorted(self.tt, key=lambda item: (self.tt[item].age == self.age, self.tt[item].depth))
             for victim in victims[:max(1, self.max_tt_entries // 16)]:
                 del self.tt[victim]
@@ -407,7 +431,6 @@ class Searcher:
 
         original_alpha, original_beta = alpha, beta
         key = self.position_key(board)
-        # Repetition draws depend on the path, so don't reuse/store this node's TT score.
         path_dependent = board.is_repetition(2)
         entry = None if path_dependent else self.tt.get(key)
         tt_move = None
@@ -645,7 +668,7 @@ def set_position(tokens: list[str]) -> None:
 
 
 def set_option(tokens: list[str]) -> None:
-    global _hash_mb, _move_overhead_ms, _use_book, _tablebase, _tablebase_path
+    global _hash_mb, _move_overhead_ms, _use_book, _tablebase, _tablebase_path, _ENGINE_STYLE
     try:
         name_index = tokens.index("name") + 1
         value_index = tokens.index("value")
@@ -658,6 +681,11 @@ def set_option(tokens: list[str]) -> None:
             _move_overhead_ms = max(0, min(int(value), 5_000))
         elif name == "use book":
             _use_book = value.lower() in {"true", "1", "on", "yes"}
+        elif name == "style":
+            normalized = value.lower().strip()
+            if normalized in _VALID_STYLES:
+                _ENGINE_STYLE = normalized
+                send(f"info string style set to {normalized}")
         elif name == "syzygypath":
             if _tablebase is not None:
                 _tablebase.close()
@@ -686,6 +714,7 @@ def main() -> None:
             send("option name Hash type spin default 16 min 1 max 256")
             send("option name Move Overhead type spin default 30 min 0 max 5000")
             send("option name Use Book type check default true")
+            send("option name Style type combo default balanced var balanced var aggressive var solid var endgame")
             send("option name SyzygyPath type string default")
             send("uciok")
         elif command == "isready":
@@ -711,3 +740,7 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+
+
+
